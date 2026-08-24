@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
+"""Getaway Alert: Find cheap flight and train getaways with calendar availability check."""
+
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
-RYANAIR_OW = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
-WIZZ_HOME = "https://www.wizzair.com/"
-WIZZ_BASE = "https://be.wizzair.com/{version}/Api"
-
+# --- Configurable Parameters ---
+# Easily add or modify home airports and train stations
 AIRPORTS = {
     "CRL": "Charleroi",
     "BRU": "Brussels",
@@ -22,11 +23,30 @@ AIRPORTS = {
     "MST": "Maastricht",
 }
 
-MAX_PER_LEG = 30.0
+# Major connected train hubs for railway getaways
+TRAIN_STATIONS = {
+    "Brussels-Central": "Brussels",
+    "Brussels-Midi": "Brussels South",
+    "Antwerpen-Centraal": "Antwerp",
+    "Liege-Guillemins": "Liège",
+}
+
+# Destinations to scan for train getaways (city names compatible with railway APIs)
+TRAIN_DESTINATIONS = [
+    "Amsterdam-Centraal",
+    "Paris-Nord",
+    "Rotterdam-Centraal",
+    "Lille-Europe",
+    "Luxembourg",
+    "Cologne-Hbf",
+]
+
+MAX_PER_LEG_FLIGHT = 30.0
+MAX_PER_LEG_TRAIN = 35.0
 LOOKAHEAD_DAYS = 35
 TRIP_MIN = 0
 TRIP_MAX = 2
-DEAL_CAP = 10
+DEAL_CAP = 12
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "deals_state.json")
@@ -50,6 +70,11 @@ CORE_DATA_EPOCH = 978307200
 CALENDAR_DB = os.path.expanduser(
     "~/Library/Group Containers/group.com.apple.calendar/Calendar.sqlitedb"
 )
+
+RYANAIR_OW = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
+WIZZ_HOME = "https://www.wizzair.com/"
+WIZZ_BASE = "https://be.wizzair.com/{version}/Api"
+IRAIL_BASE = "https://api.irail.be/connections/"
 
 
 def get_json(url, headers=None, data=None, timeout=60, opener=None):
@@ -102,7 +127,7 @@ def wizz_round_trips(start, end):
         return results
 
     cities = {c.get("iata"): c for c in map_data.get("cities", [])}
-    origin_cities = ["CRL", "EIN", "MST"]
+    origin_cities = [code for code in AIRPORTS if code in cities]
 
     outbound_routes = []
     for origin in origin_cities:
@@ -125,10 +150,7 @@ def wizz_round_trips(start, end):
                      "from": start.isoformat(),
                      "to": (end + dt.timedelta(days=TRIP_MAX)).isoformat()},
                 ],
-                "priceType": "regular",
-                "adultCount": 1,
-                "childCount": 0,
-                "infantCount": 0
+                "priceType": "regular", "adultCount": 1, "childCount": 0, "infantCount": 0
             }
             headers = {
                 "User-Agent": UA,
@@ -150,20 +172,78 @@ def wizz_round_trips(start, end):
                             continue
                         po = float((out.get("price") or {}).get("amount", 0) or 0)
                         pi = float((ret.get("price") or {}).get("amount", 0) or 0)
-                        if not (0 < po < MAX_PER_LEG and 0 < pi < MAX_PER_LEG):
+                        if not (0 < po < MAX_PER_LEG_FLIGHT and 0 < pi < MAX_PER_LEG_FLIGHT):
                             continue
-                        results.append(make_deal("Wizz Air", out, ret, po, pi, origin, dest))
+                        results.append(make_flight_deal("Wizz Air", out, ret, po, pi, origin, dest))
             except Exception:
                 continue
     return results
 
 
-def make_deal(airline, out, ret, po, pi, origin=None, destination=None):
+def fetch_train_deals(start, end):
+    """Scan railway connections for short distance getaways."""
+    deals = []
+    headers = {"User-Agent": "GetawayAlert/1.0 (https://github.com/sudoShiba/getaway-alert)"}
+
+    for origin_station, origin_name in TRAIN_STATIONS.items():
+        for dest_station in TRAIN_DESTINATIONS:
+            if origin_name.lower() in dest_station.lower():
+                continue
+
+            target_date = start
+            while target_date <= end:
+                date_str = target_date.strftime("%d%m%y")
+                params = {
+                    "from": origin_station,
+                    "to": dest_station,
+                    "date": date_str,
+                    "time": "0800",
+                    "timeSel": "depart",
+                    "format": "json"
+                }
+                url = IRAIL_BASE + "?" + urllib.parse.urlencode(params)
+                try:
+                    data = get_json(url, headers=headers, timeout=10)
+                    conns = data.get("connection", []) or []
+                    if conns:
+                        # Grab the first available train option
+                        c = conns[0]
+                        dep_ts = int(c["departure"]["time"])
+                        arr_ts = int(c["arrival"]["time"])
+                        dep_dt = dt.datetime.fromtimestamp(dep_ts).astimezone()
+                        arr_dt = dt.datetime.fromtimestamp(arr_ts).astimezone()
+
+                        # Estimated standard tariff estimate for short-haul EU rail leg
+                        estimated_leg_price = 25.0
+                        total_price = estimated_leg_price * 2
+
+                        deals.append({
+                            "type": "train",
+                            "airline": "Eurostar/Railway",
+                            "out_station": origin_name,
+                            "dest_station": dest_station.replace("-Centraal", "").replace("-Nord", ""),
+                            "dep_date": dep_dt.date(),
+                            "ret_date": dep_dt.date() + dt.timedelta(days=1),
+                            "dep_dt": dep_dt,
+                            "arr_dt": arr_dt,
+                            "total": total_price,
+                            "po": estimated_leg_price,
+                            "pi": estimated_leg_price,
+                            "route_str": f"{origin_name} → {dest_station.split('-')[0]} (Train)",
+                        })
+                except Exception:
+                    pass
+                target_date += dt.timedelta(days=7) # Sample weekly
+    return deals
+
+
+def make_flight_deal(airline, out, ret, po, pi, origin=None, destination=None):
     out_air = out.get("departureAirport") or {"iataCode": origin, "name": origin}
     arr_air = out.get("arrivalAirport") or {"iataCode": destination, "name": destination}
     ret_dep = ret.get("departureAirport") or {"iataCode": destination, "name": destination}
     ret_arr = ret.get("arrivalAirport") or {"iataCode": origin, "name": origin}
     return {
+        "type": "flight",
         "airline": airline, "out": out, "ret": ret, "po": po, "pi": pi,
         "total": round(po + pi, 2), "out_air": out_air, "arr_air": arr_air,
         "ret_dep": ret_dep, "ret_arr": ret_arr,
@@ -173,6 +253,8 @@ def make_deal(airline, out, ret, po, pi, origin=None, destination=None):
 
 
 def route_key(deal):
+    if deal["type"] == "train":
+        return f"TRAIN|{deal['out_station']}|{deal['dest_station']}|{deal['dep_date'].isoformat()}"
     out, ret = deal["out"], deal["ret"]
     on = out.get("flightNumber") or (out.get("departureStation", "") + "-" + out.get("arrivalStation", ""))
     rn = ret.get("flightNumber") or (ret.get("departureStation", "") + "-" + ret.get("arrivalStation", ""))
@@ -194,7 +276,7 @@ def fetch_calendar_map(dates):
     start_local = dt.datetime.fromisoformat(min(dates))
     end_local = dt.datetime.fromisoformat(max(dates)) + dt.timedelta(days=1)
     s, e = _core_ts(start_local), _core_ts(end_local)
-    
+
     if not os.path.exists(CALENDAR_DB):
         return {}, None
 
@@ -241,6 +323,8 @@ def fetch_calendar_map(dates):
 
 
 def clock(iso):
+    if isinstance(iso, dt.datetime):
+        return iso.strftime("%a %-d %b %H:%M")
     return dt.datetime.fromisoformat(iso).strftime("%a %-d %b %H:%M")
 
 
@@ -249,6 +333,8 @@ def airport_name(airport, fallback="?"):
 
 
 def get_utility(deal):
+    if deal["type"] == "train":
+        return "🚆 Train Getaway"
     out_dep = dt.datetime.fromisoformat(deal["out"]["departureDate"][:19])
     ret_arr = dt.datetime.fromisoformat(deal["ret"].get("arrivalDate", deal["ret"]["departureDate"])[:19])
     stay_hours = (ret_arr - out_dep).total_seconds() / 3600
@@ -262,7 +348,6 @@ def get_utility(deal):
 
 
 def format_deal(deal, cal_map, cal_error):
-    out, ret = deal["out"], deal["ret"]
     busy_lines = []
     current = deal["dep_date"]
     while current <= deal["ret_date"]:
@@ -279,26 +364,29 @@ def format_deal(deal, cal_map, cal_error):
             unique_busy.append(bl)
     busy_lines = unique_busy
 
-    if cal_map is None:
-        prefix = "✅ FREE?"
-    elif busy_lines:
-        prefix = "❌ busy"
-    else:
-        prefix = "✅ FREE"
-
+    prefix = "✅ FREE?" if cal_map is None else ("❌ busy" if busy_lines else "✅ FREE")
     utility = get_utility(deal)
 
-    oa = out.get("departureAirport") or deal["out_air"]
-    aa = out.get("arrivalAirport") or deal["arr_air"]
-    ra = ret.get("departureAirport") or deal["ret_dep"]
-    za = ret.get("arrivalAirport") or deal["ret_arr"]
-    route = f"{oa.get('iataCode', '?')} → {aa.get('iataCode', '?')} ({airport_name(aa)})"
-    lines = [
-        f"{prefix} | {route} | {utility}",
-        f"🛫 Out: {clock(out['departureDate'])} {oa.get('iataCode', '?')} → {clock(out.get('arrivalDate', out['departureDate']))} {aa.get('iataCode', '?')}",
-        f"🛬 Ret: {clock(ret['departureDate'])} {ra.get('iataCode', '?')} → {clock(ret.get('arrivalDate', ret['departureDate']))} {za.get('iataCode', '?')}",
-        f"💰 €{deal['po']:.2f} + €{deal['pi']:.2f} = €{deal['total']:.2f}"
-    ]
+    if deal["type"] == "train":
+        lines = [
+            f"{prefix} | {deal['route_str']} | {utility}",
+            f"🚆 Outbound: {clock(deal['dep_dt'])} {deal['out_station']} → {deal['dest_station']}",
+            f"💰 Est. ~€{deal['total']:.2f} round-trip"
+        ]
+    else:
+        out, ret = deal["out"], deal["ret"]
+        oa = out.get("departureAirport") or deal["out_air"]
+        aa = out.get("arrivalAirport") or deal["arr_air"]
+        ra = ret.get("departureAirport") or deal["ret_dep"]
+        za = ret.get("arrivalAirport") or deal["ret_arr"]
+        route = f"{oa.get('iataCode', '?')} → {aa.get('iataCode', '?')} ({airport_name(aa)})"
+        lines = [
+            f"{prefix} | {route} | {utility}",
+            f"🛫 Out: {clock(out['departureDate'])} {oa.get('iataCode', '?')} → {clock(out.get('arrivalDate', out['departureDate']))} {aa.get('iataCode', '?')}",
+            f"🛬 Ret: {clock(ret['departureDate'])} {ra.get('iataCode', '?')} → {clock(ret.get('arrivalDate', ret['departureDate']))} {za.get('iataCode', '?')}",
+            f"💰 €{deal['po']:.2f} + €{deal['pi']:.2f} = €{deal['total']:.2f}"
+        ]
+
     if busy_lines:
         lines.append("❌ busy: " + " ; ".join(busy_lines[:2]))
     elif cal_error:
@@ -337,6 +425,7 @@ def main():
     all_out = []
     all_in = []
 
+    # 1. Fetch Flights (Ryanair & Wizz Air)
     for origin in AIRPORTS.keys():
         try:
             outbound_fares = ryanair_one_way(origin, start, end)
@@ -347,7 +436,7 @@ def main():
                 if d.get("departureDate", "")[11:19] == "00:00:00":
                     continue
                 po = float(d["price"]["value"])
-                if po >= MAX_PER_LEG:
+                if po >= MAX_PER_LEG_FLIGHT:
                     continue
                 arr_iata = d.get("arrivalAirport", {}).get("iataCode")
                 if not arr_iata:
@@ -374,7 +463,7 @@ def main():
                 if d.get("departureDate", "")[11:19] == "00:00:00":
                     continue
                 pi = float(d["price"]["value"])
-                if pi >= MAX_PER_LEG:
+                if pi >= MAX_PER_LEG_FLIGHT:
                     continue
                 arr_iata = d.get("arrivalAirport", {}).get("iataCode")
                 if arr_iata not in AIRPORTS:
@@ -396,9 +485,9 @@ def main():
             trip_days = (inc["date"] - out["date"]).days
             if not (TRIP_MIN <= trip_days <= TRIP_MAX):
                 continue
-            deal = make_deal("Ryanair", out["fare_data"], inc["fare_data"],
-                             out["price"], inc["price"],
-                             origin=out["origin"], destination=out["dest"])
+            deal = make_flight_deal("Ryanair", out["fare_data"], inc["fare_data"],
+                                     out["price"], inc["price"],
+                                     origin=out["origin"], destination=out["dest"])
             if deal:
                 deals.append(deal)
 
@@ -407,7 +496,16 @@ def main():
     except Exception as exc:
         errors.append("Wizz Air: " + str(exc))
 
+    # 2. Fetch Train Getaways
+    try:
+        train_deals = fetch_train_deals(start, end)
+        deals.extend(train_deals)
+    except Exception as exc:
+        errors.append("Trains: " + str(exc))
+
     def looks_fake(deal):
+        if deal["type"] == "train":
+            return False
         out, ret = deal["out"], deal["ret"]
         if out.get("departureDate", "")[11:19] == "00:00:00" or ret.get("departureDate", "")[11:19] == "00:00:00":
             return True
@@ -470,13 +568,13 @@ def main():
         message = "\n\n".join(chunks)
         if errors:
             message += "\n\n⚠️ Source errors: " + " ; ".join(errors)[:350]
-        pushover("✈️ Getaway Alert", message)
+        pushover("✈️🚆 Getaway Alert", message)
     elif errors:
         message = "⚠️ Getaway Alert source errors:\n" + "\n".join(errors)
-        pushover("✈️ Getaway Alert", message)
+        pushover("✈️🚆 Getaway Alert", message)
     else:
-        message = "🛫 No deals found today — the skies are quiet."
-        pushover("✈️ Getaway Alert", message)
+        message = "🛫 No deals found today — the skies & rails are quiet."
+        pushover("✈️🚆 Getaway Alert", message)
 
 
 if __name__ == "__main__":

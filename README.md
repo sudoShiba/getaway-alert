@@ -4,7 +4,8 @@ A light, automated Python tool to scan budget flights (Ryanair, Wizz Air) and tr
 
 ## Features
 
-- **Multi-Airline Fare Finder:** Scans Ryanair and Wizz Air APIs for cheap round trips and open-jaw connections (sub-€30/leg).
+- **Multi-Source Scan:** Scans Ryanair, Wizz Air, and European rail connections (iRail / Eurostar) for quick getaways.
+- **Configurable Hubs:** Easily configure home airports (`AIRPORTS`) and departure train stations (`TRAIN_STATIONS`) via top-level dictionary constants.
 - **Local Calendar Integration:** Queries macOS `Calendar.sqlitedb` directly (read-only SQLite query) to automatically flag busy days in alerts.
 - **Price Trend Tracking:** Keeps track of previous deal prices in `deals_state.json` to highlight price drops (🚨) or increases (📈).
 - **Push Notifications:** Sends daily summaries straight via Pushover CLI / API.
@@ -19,7 +20,7 @@ A light, automated Python tool to scan budget flights (Ryanair, Wizz Air) and tr
 
 1. Set your Pushover credentials in environment variables (optional):
    ```bash
-   export PUSHOVER_TOKEN="your_token_here"
+   export PUSHOVER_TOKEN="your_pushover_app_token"
    export PUSHOVER_USER="your_user_key_here"
    ```
 
@@ -30,7 +31,24 @@ A light, automated Python tool to scan budget flights (Ryanair, Wizz Air) and tr
 
 ## Configuration
 
-You can tweak top-level parameters in `getaway.py`:
-- `MAX_PER_LEG`: Max price threshold per flight leg (default: €30.0)
-- `LOOKAHEAD_DAYS`: Days ahead to check (default: 35)
-- `AIRPORTS`: Dict of origin/destination airport IATA codes (CRL, BRU, EIN, etc.)
+You can fully customize airport and station hubs at the top of `getaway.py`:
+```python
+AIRPORTS = {
+    "CRL": "Charleroi",
+    "BRU": "Brussels",
+    "EIN": "Eindhoven",
+    "LIL": "Lille",
+    "ANR": "Antwerp",
+}
+
+TRAIN_STATIONS = {
+    "Brussels-Central": "Brussels",
+    "Antwerpen-Centraal": "Antwerp",
+}
+
+TRAIN_DESTINATIONS = [
+    "Amsterdam-Centraal",
+    "Paris-Nord",
+    "Rotterdam-Centraal",
+]
+```

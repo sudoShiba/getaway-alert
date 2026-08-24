@@ -5,50 +5,52 @@ A light, automated Python tool to scan budget flights (Ryanair, Wizz Air) and tr
 ## Features
 
 - **Multi-Source Scan:** Scans Ryanair, Wizz Air, and European rail connections (iRail / Eurostar) for quick getaways.
-- **Configurable Hubs:** Easily configure home airports (`AIRPORTS`) and departure train stations (`TRAIN_STATIONS`) via top-level dictionary constants.
+- **YAML Configuration & Environment Variables:** Fully configurable via `config.yaml` or environment variables for secret management.
 - **Local Calendar Integration:** Queries macOS `Calendar.sqlitedb` directly (read-only SQLite query) to automatically flag busy days in alerts.
 - **Price Trend Tracking:** Keeps track of previous deal prices in `deals_state.json` to highlight price drops (🚨) or increases (📈).
-- **Push Notifications:** Sends daily summaries straight via Pushover CLI / API.
+- **Push Notifications:** Sends daily summaries straight via Pushover.
 
-## Requirements
+## Setup & Usage
 
-- Python 3.10+ (Standard library only; no extra `pip` requirements needed).
-- macOS (if you want the SQLite Apple Calendar availability check).
-- Pushover account (optional, for notifications).
-
-## Usage
-
-1. Set your Pushover credentials in environment variables (optional):
+1. **Configuration File (`config.yaml`):**
+   Copy `config.example.yaml` to `config.yaml`:
    ```bash
-   export PUSHOVER_TOKEN="your_pushover_app_token"
-   export PUSHOVER_USER="your_user_key_here"
+   cp config.example.yaml config.yaml
    ```
 
-2. Run the script:
+2. **API Keys / Secrets:**
+   Set API keys in your environment variables (recommended) or optionally inside `config.yaml`:
+   ```bash
+   export PUSHOVER_TOKEN="your_pushover_token_here"
+   export PUSHOVER_USER="your_pushover_user_key_here"
+   export KIWI_TEQUILA_API_KEY="your_kiwi_api_key_here"
+   ```
+   *Note: Environment variables automatically override values in `config.yaml` to prevent accidental credential commits.*
+
+3. **Run the script:**
    ```bash
    python3 getaway.py
    ```
 
-## Configuration
+## Customizing Routes & Parameters
 
-You can fully customize airport and station hubs at the top of `getaway.py`:
-```python
-AIRPORTS = {
-    "CRL": "Charleroi",
-    "BRU": "Brussels",
-    "EIN": "Eindhoven",
-    "LIL": "Lille",
-    "ANR": "Antwerp",
-}
+Customize travel settings, departure hubs, and destinations in `config.yaml`:
 
-TRAIN_STATIONS = {
-    "Brussels-Central": "Brussels",
-    "Antwerpen-Centraal": "Antwerp",
-}
+```yaml
+max_flight_leg_price: 30.0
+max_train_leg_price: 35.0
 
-TRAIN_DESTINATIONS = [
-    "Amsterdam-Centraal",
-    "Paris-Nord",
-    "Rotterdam-Centraal",
-]
+airports:
+  CRL: "Charleroi"
+  BRU: "Brussels"
+  EIN: "Eindhoven"
+
+train_stations:
+  Brussels-Central: "Brussels"
+  Antwerpen-Centraal: "Antwerp"
+
+train_destinations:
+  - "Amsterdam-Centraal"
+  - "Paris-Nord"
+  - "Rotterdam-Centraal"
 ```

@@ -1,0 +1,43 @@
+# Getaway Alert Configuration
+
+# Travel parameters
+max_flight_leg_price: 30.0
+max_train_leg_price: 35.0
+lookahead_days: 35
+trip_min_days: 0
+trip_max_days: 2
+deal_cap: 12
+
+# Departure Airports (IATA Code -> City Name)
+airports:
+  CRL: "Charleroi"
+  BRU: "Brussels"
+  EIN: "Eindhoven"
+  LIL: "Lille"
+  ANR: "Antwerp"
+  OST: "Ostend"
+  MST: "Maastricht"
+
+# Departure Train Stations
+train_stations:
+  Brussels-Central: "Brussels"
+  Brussels-Midi: "Brussels South"
+  Antwerpen-Centraal: "Antwerp"
+  Liege-Guillemins: "Liège"
+
+# Destination Train Stations
+train_destinations:
+  - "Amsterdam-Centraal"
+  - "Paris-Nord"
+  - "Rotterdam-Centraal"
+  - "Lille-Europe"
+  - "Luxembourg"
+  - "Cologne-Hbf"
+
+# Optional API Keys (can also be supplied via environment variables)
+# Environment variables will override these settings if set:
+# PUSHOVER_TOKEN, PUSHOVER_USER, KIWI_TEQUILA_API_KEY
+api_keys:
+  pushover_token: ""
+  pushover_user: ""
+  kiwi_tequila_api_key: ""

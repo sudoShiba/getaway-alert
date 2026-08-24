@@ -7,52 +7,97 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
-# --- Configurable Parameters ---
-# Easily add or modify home airports and train stations
-AIRPORTS = {
-    "CRL": "Charleroi",
-    "BRU": "Brussels",
-    "EIN": "Eindhoven",
-    "LIL": "Lille",
-    "ANR": "Antwerp",
-    "OST": "Ostend",
-    "MST": "Maastricht",
-}
-
-# Major connected train hubs for railway getaways
-TRAIN_STATIONS = {
-    "Brussels-Central": "Brussels",
-    "Brussels-Midi": "Brussels South",
-    "Antwerpen-Centraal": "Antwerp",
-    "Liege-Guillemins": "Liège",
-}
-
-# Destinations to scan for train getaways (city names compatible with railway APIs)
-TRAIN_DESTINATIONS = [
-    "Amsterdam-Centraal",
-    "Paris-Nord",
-    "Rotterdam-Centraal",
-    "Lille-Europe",
-    "Luxembourg",
-    "Cologne-Hbf",
-]
-
-MAX_PER_LEG_FLIGHT = 30.0
-MAX_PER_LEG_TRAIN = 35.0
-LOOKAHEAD_DAYS = 35
-TRIP_MIN = 0
-TRIP_MAX = 2
-DEAL_CAP = 12
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "deals_state.json")
+CONFIG_FILE = os.path.join(HERE, "config.yaml")
 
-PUSHOVER_TOKEN = os.environ.get("PUSHOVER_TOKEN", "")
-PUSHOVER_USER = os.environ.get("PUSHOVER_USER", "")
+# Try importing PyYAML if available, else lightweight manual YAML fallback
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
+
+def load_config():
+    """Load configuration from config.yaml with env var overrides."""
+    config = {
+        "max_flight_leg_price": 30.0,
+        "max_train_leg_price": 35.0,
+        "lookahead_days": 35,
+        "trip_min_days": 0,
+        "trip_max_days": 2,
+        "deal_cap": 12,
+        "airports": {
+            "CRL": "Charleroi", "BRU": "Brussels", "EIN": "Eindhoven",
+            "LIL": "Lille", "ANR": "Antwerp", "OST": "Ostend", "MST": "Maastricht"
+        },
+        "train_stations": {
+            "Brussels-Central": "Brussels", "Brussels-Midi": "Brussels South",
+            "Antwerpen-Centraal": "Antwerp", "Liege-Guillemins": "Liège"
+        },
+        "train_destinations": [
+            "Amsterdam-Centraal", "Paris-Nord", "Rotterdam-Centraal",
+            "Lille-Europe", "Luxembourg", "Cologne-Hbf"
+        ],
+        "api_keys": {
+            "pushover_token": os.environ.get("PUSHOVER_TOKEN", ""),
+            "pushover_user": os.environ.get("PUSHOVER_USER", ""),
+            "kiwi_tequila_api_key": os.environ.get("KIWI_TEQUILA_API_KEY", "")
+        }
+    }
+
+    if os.path.exists(CONFIG_FILE):
+        if HAS_YAML:
+            with open(CONFIG_FILE, "r") as f:
+                file_conf = yaml.safe_load(f) or {}
+                # Update top level keys
+                for k, v in file_conf.items():
+                    if k == "api_keys" and isinstance(v, dict):
+                        config["api_keys"].update(v)
+                    elif k in config:
+                        config[k] = v
+        else:
+            # Basic key-value parse if PyYAML isn't installed
+            with open(CONFIG_FILE, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("pushover_token:"):
+                        val = line.split(":", 1)[1].strip().strip('"\'')
+                        if val: config["api_keys"]["pushover_token"] = val
+                    elif line.startswith("pushover_user:"):
+                        val = line.split(":", 1)[1].strip().strip('"\'')
+                        if val: config["api_keys"]["pushover_user"] = val
+
+    # Environment variables take precedence over config.yaml
+    if os.environ.get("PUSHOVER_TOKEN"):
+        config["api_keys"]["pushover_token"] = os.environ.get("PUSHOVER_TOKEN")
+    if os.environ.get("PUSHOVER_USER"):
+        config["api_keys"]["pushover_user"] = os.environ.get("PUSHOVER_USER")
+    if os.environ.get("KIWI_TEQUILA_API_KEY"):
+        config["api_keys"]["kiwi_tequila_api_key"] = os.environ.get("KIWI_TEQUILA_API_KEY")
+
+    return config
+
+
+CONFIG = load_config()
+
+AIRPORTS = CONFIG["airports"]
+TRAIN_STATIONS = CONFIG["train_stations"]
+TRAIN_DESTINATIONS = CONFIG["train_destinations"]
+MAX_PER_LEG_FLIGHT = CONFIG["max_flight_leg_price"]
+MAX_PER_LEG_TRAIN = CONFIG["max_train_leg_price"]
+LOOKAHEAD_DAYS = CONFIG["lookahead_days"]
+TRIP_MIN = CONFIG["trip_min_days"]
+TRIP_MAX = CONFIG["trip_max_days"]
+DEAL_CAP = CONFIG["deal_cap"]
+PUSHOVER_TOKEN = CONFIG["api_keys"]["pushover_token"]
+PUSHOVER_USER = CONFIG["api_keys"]["pushover_user"]
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -206,14 +251,12 @@ def fetch_train_deals(start, end):
                     data = get_json(url, headers=headers, timeout=10)
                     conns = data.get("connection", []) or []
                     if conns:
-                        # Grab the first available train option
                         c = conns[0]
                         dep_ts = int(c["departure"]["time"])
                         arr_ts = int(c["arrival"]["time"])
                         dep_dt = dt.datetime.fromtimestamp(dep_ts).astimezone()
                         arr_dt = dt.datetime.fromtimestamp(arr_ts).astimezone()
 
-                        # Estimated standard tariff estimate for short-haul EU rail leg
                         estimated_leg_price = 25.0
                         total_price = estimated_leg_price * 2
 
@@ -233,7 +276,7 @@ def fetch_train_deals(start, end):
                         })
                 except Exception:
                     pass
-                target_date += dt.timedelta(days=7) # Sample weekly
+                target_date += dt.timedelta(days=7)
     return deals
 
 

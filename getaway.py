@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import subprocess
-import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,7 +16,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "deals_state.json")
 CONFIG_FILE = os.path.join(HERE, "config.yaml")
 
-# Try importing PyYAML if available, else lightweight manual YAML fallback
 try:
     import yaml
     HAS_YAML = True
@@ -56,14 +55,12 @@ def load_config():
         if HAS_YAML:
             with open(CONFIG_FILE, "r") as f:
                 file_conf = yaml.safe_load(f) or {}
-                # Update top level keys
                 for k, v in file_conf.items():
                     if k == "api_keys" and isinstance(v, dict):
                         config["api_keys"].update(v)
                     elif k in config:
                         config[k] = v
         else:
-            # Basic key-value parse if PyYAML isn't installed
             with open(CONFIG_FILE, "r") as f:
                 for line in f:
                     line = line.strip()
@@ -73,8 +70,10 @@ def load_config():
                     elif line.startswith("pushover_user:"):
                         val = line.split(":", 1)[1].strip().strip('"\'')
                         if val: config["api_keys"]["pushover_user"] = val
+                    elif line.startswith("kiwi_tequila_api_key:"):
+                        val = line.split(":", 1)[1].strip().strip('"\'')
+                        if val: config["api_keys"]["kiwi_tequila_api_key"] = val
 
-    # Environment variables take precedence over config.yaml
     if os.environ.get("PUSHOVER_TOKEN"):
         config["api_keys"]["pushover_token"] = os.environ.get("PUSHOVER_TOKEN")
     if os.environ.get("PUSHOVER_USER"):
@@ -98,6 +97,7 @@ TRIP_MAX = CONFIG["trip_max_days"]
 DEAL_CAP = CONFIG["deal_cap"]
 PUSHOVER_TOKEN = CONFIG["api_keys"]["pushover_token"]
 PUSHOVER_USER = CONFIG["api_keys"]["pushover_user"]
+KIWI_KEY = CONFIG["api_keys"]["kiwi_tequila_api_key"]
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
@@ -120,17 +120,113 @@ RYANAIR_OW = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
 WIZZ_HOME = "https://www.wizzair.com/"
 WIZZ_BASE = "https://be.wizzair.com/{version}/Api"
 IRAIL_BASE = "https://api.irail.be/connections/"
+KIWI_SEARCH = "https://tequila-api.kiwi.com/v2/search"
 
 
-def get_json(url, headers=None, data=None, timeout=60, opener=None):
+def get_json(url, headers=None, data=None, timeout=30, opener=None, retries=2):
+    """Robust HTTP fetcher with retries and backoff."""
     req = urllib.request.Request(url, headers=headers or HEADERS, data=data,
                                  method="POST" if data is not None else "GET")
-    if opener is None:
-        ctx = urllib.request.urlopen(req, timeout=timeout)
-    else:
-        ctx = opener.open(req, timeout=timeout)
-    with ctx as response:
-        return json.load(response)
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            if opener is None:
+                ctx = urllib.request.urlopen(req, timeout=timeout)
+            else:
+                ctx = opener.open(req, timeout=timeout)
+            with ctx as response:
+                return json.load(response)
+        except Exception as exc:
+            last_err = exc
+            if attempt < retries:
+                time.sleep(1.0 * (attempt + 1))
+    raise last_err
+
+
+def kiwi_search_deals(start, end):
+    """Fetch live flight and train deals from Kiwi Tequila API if key is available."""
+    if not KIWI_KEY:
+        return []
+
+    deals = []
+    headers = {"apikey": KIWI_KEY, "Accept": "application/json"}
+    fly_from = ",".join(AIRPORTS.keys())
+
+    params = {
+        "fly_from": fly_from,
+        "date_from": start.strftime("%d/%m/%Y"),
+        "date_to": end.strftime("%d/%m/%Y"),
+        "nights_in_dst_from": TRIP_MIN,
+        "nights_in_dst_to": TRIP_MAX,
+        "curr": "EUR",
+        "price_to": int((MAX_PER_LEG_FLIGHT * 2)),
+        "max_stopovers": 0,
+        "limit": 50
+    }
+
+    url = KIWI_SEARCH + "?" + urllib.parse.urlencode(params)
+    try:
+        data = get_json(url, headers=headers, timeout=25)
+        for item in data.get("data", []):
+            price = float(item.get("price", 0))
+            if price <= 0:
+                continue
+
+            vehicle = "flight"
+            route = item.get("route", [])
+            if any(r.get("vehicle_type") == "train" for r in route):
+                vehicle = "train"
+
+            dep_ts = item.get("dTime")
+            arr_ts = item.get("aTime")
+            dep_dt = dt.datetime.fromtimestamp(dep_ts).astimezone() if dep_ts else None
+            ret_dt = dt.datetime.fromtimestamp(arr_ts).astimezone() if arr_ts else None
+
+            if not dep_dt or not ret_dt:
+                continue
+
+            city_from = item.get("cityFrom", "")
+            city_to = item.get("cityTo", "")
+            fly_code_from = item.get("flyFrom", "")
+            fly_code_to = item.get("flyTo", "")
+            airlines = ", ".join(set(item.get("airlines", []))) or "Kiwi Partner"
+
+            if vehicle == "train":
+                deals.append({
+                    "type": "train",
+                    "airline": f"Kiwi Rail ({airlines})",
+                    "out_station": f"{city_from} ({fly_code_from})",
+                    "dest_station": f"{city_to} ({fly_code_to})",
+                    "dep_date": dep_dt.date(),
+                    "ret_date": ret_dt.date(),
+                    "dep_dt": dep_dt,
+                    "arr_dt": ret_dt,
+                    "total": price,
+                    "po": price / 2,
+                    "pi": price / 2,
+                    "route_str": f"{fly_code_from} → {fly_code_to} ({city_to})",
+                })
+            else:
+                out_air = {"iataCode": fly_code_from, "name": city_from}
+                arr_air = {"iataCode": fly_code_to, "name": city_to}
+                deals.append({
+                    "type": "flight",
+                    "airline": f"Kiwi ({airlines})",
+                    "out": {"departureDate": dep_dt.isoformat(), "departureAirport": out_air, "arrivalAirport": arr_air},
+                    "ret": {"departureDate": ret_dt.isoformat(), "departureAirport": arr_air, "arrivalAirport": out_air},
+                    "po": round(price / 2, 2),
+                    "pi": round(price / 2, 2),
+                    "total": round(price, 2),
+                    "out_air": out_air,
+                    "arr_air": arr_air,
+                    "ret_dep": arr_air,
+                    "ret_arr": out_air,
+                    "dep_date": dep_dt.date(),
+                    "ret_date": ret_dt.date()
+                })
+    except Exception as exc:
+        print(f"Kiwi API notice: {exc}")
+    return deals
 
 
 def ryanair_one_way(origin, start, end):
@@ -226,7 +322,7 @@ def wizz_round_trips(start, end):
 
 
 def fetch_train_deals(start, end):
-    """Scan railway connections for short distance getaways."""
+    """Scan railway connections for short distance getaways via iRail."""
     deals = []
     headers = {"User-Agent": "GetawayAlert/1.0 (https://github.com/sudoShiba/getaway-alert)"}
 
@@ -248,7 +344,7 @@ def fetch_train_deals(start, end):
                 }
                 url = IRAIL_BASE + "?" + urllib.parse.urlencode(params)
                 try:
-                    data = get_json(url, headers=headers, timeout=10)
+                    data = get_json(url, headers=headers, timeout=10, retries=1)
                     conns = data.get("connection", []) or []
                     if conns:
                         c = conns[0]
@@ -468,7 +564,7 @@ def main():
     all_out = []
     all_in = []
 
-    # 1. Fetch Flights (Ryanair & Wizz Air)
+    # 1. Fetch Flights (Ryanair)
     for origin in AIRPORTS.keys():
         try:
             outbound_fares = ryanair_one_way(origin, start, end)
@@ -534,12 +630,20 @@ def main():
             if deal:
                 deals.append(deal)
 
+    # 2. Fetch Wizz Air
     try:
         deals.extend(wizz_round_trips(start, end))
     except Exception as exc:
         errors.append("Wizz Air: " + str(exc))
 
-    # 2. Fetch Train Getaways
+    # 3. Fetch Kiwi Tequila Deals (if configured)
+    try:
+        kiwi_deals = kiwi_search_deals(start, end)
+        deals.extend(kiwi_deals)
+    except Exception as exc:
+        errors.append("Kiwi Tequila: " + str(exc))
+
+    # 4. Fetch Train Getaways (iRail)
     try:
         train_deals = fetch_train_deals(start, end)
         deals.extend(train_deals)

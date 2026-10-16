@@ -14,6 +14,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(HERE, "deals_state.json")
+STATE_MAX_AGE_DAYS = 14  # drop state entries not seen within this many days
 CONFIG_FILE = os.path.join(HERE, "config.yaml")
 
 try:
@@ -543,8 +544,29 @@ def load_state():
 
 
 def save_state(state):
+    # Prune expired/stale entries before writing so the state file does not
+    # grow unbounded over time (deals whose departure date has passed, or
+    # entries not seen for more than STATE_MAX_AGE_DAYS).
+    today = dt.date.today()
+    cutoff_seen = today - dt.timedelta(days=STATE_MAX_AGE_DAYS)
+    pruned = {}
+    for key, val in state.items():
+        parts = key.split("|")
+        dep_date = None
+        for token in parts:
+            try:
+                dep_date = dt.datetime.fromisoformat(token).date()
+                break
+            except ValueError:
+                continue
+        try:
+            last_seen = dt.date.fromisoformat(val.get("last_seen", ""))
+        except (ValueError, AttributeError):
+            last_seen = None
+        if (dep_date is None or dep_date >= today) and (last_seen is None or last_seen >= cutoff_seen):
+            pruned[key] = val
     with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+        json.dump(pruned, f, indent=2)
 
 
 def pushover(title, message):
